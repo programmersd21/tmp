@@ -1,4 +1,4 @@
-name: Migrate GitHub Pages URLs (pro-grammer-SD → programmersd21)
+name: Migrate GitHub Pages URLs → programmersd21
 
 on:
   workflow_dispatch:
@@ -34,7 +34,8 @@ jobs:
           > pages_repos.txt
 
           while IFS= read -r full_name; do
-            response=$(curl -fsSL -o /dev/null -w "%{http_code}" \
+            # No -f flag here — we WANT to inspect 404s without curl aborting
+            response=$(curl -sSL -o /dev/null -w "%{http_code}" \
               -H "Authorization: token ${{ secrets.GH_PAT }}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/${full_name}/pages")
@@ -43,7 +44,7 @@ jobs:
               echo "  📄 Pages enabled: $full_name"
               echo "$full_name" >> pages_repos.txt
             else
-              echo "  ·  No Pages:      $full_name"
+              echo "  ·  No Pages ($response): $full_name"
             fi
           done < repo_names.txt
 
@@ -51,12 +52,10 @@ jobs:
           echo "Repos with Pages: $(wc -l < pages_repos.txt)"
           cat pages_repos.txt
 
-      - name: Replace Pages URLs and update Pages source branch
+      - name: Replace Pages URLs
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-          # Only the .github.io domain is in scope — nothing else is touched
-          OLD_PATTERN: 'pro-grammer-SD\.github\.io'
-          NEW_DOMAIN:  'programmersd21.github.io'
+          NEW_DOMAIN: 'programmersd21.github.io'
         run: |
           mkdir -p workdir
           CHANGED=0
@@ -71,7 +70,8 @@ jobs:
 
             auth_url="https://x-access-token:${GH_PAT}@github.com/${full_name}.git"
 
-            pages_info=$(curl -fsSL \
+            # No -f here either — a non-200 pages response shouldn't abort
+            pages_info=$(curl -sSL \
               -H "Authorization: token ${GH_PAT}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/${full_name}/pages")
@@ -94,14 +94,28 @@ jobs:
 
             cd workdir/temp
 
-            # grep with -i so it catches any casing of the old domain
-            if grep -rqil --exclude-dir=.git "pro-grammer-SD\.github\.io" .; then
+            # Detect any of the three old domain forms (case-insensitive covers all variants)
+            #   pro-grammer-SD.github.io
+            #   pro-grammer-sd.github.io
+            #   programmersd.github.io
+            if grep -rqil --exclude-dir=.git \
+                -e "pro-grammer-SD\.github\.io" \
+                -e "programmersd\.github\.io" \
+                .; then
+
               echo "  🔍 Found stale Pages URL references — replacing..."
 
-              # perl -i with /gi: case-insensitive, replaces all occurrences per line
-              # The pattern is anchored to .github.io so nothing else is touched
-              grep -ril --exclude-dir=.git "pro-grammer-SD\.github\.io" . \
-                | xargs perl -pi -e "s/${OLD_PATTERN}/${NEW_DOMAIN}/gi"
+              grep -ril --exclude-dir=.git \
+                  -e "pro-grammer-SD\.github\.io" \
+                  -e "programmersd\.github\.io" \
+                  . \
+                | xargs perl -pi -e '
+                    # Replace hyphenated old username (any casing)
+                    s/pro-grammer-SD\.github\.io/programmersd21.github.io/gi;
+                    # Replace unhyphenated old username
+                    # Use negative lookahead so programmersd21 is never touched
+                    s/programmersd(?!21)\.github\.io/programmersd21.github.io/gi;
+                  '
 
               git config user.name  "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -110,24 +124,25 @@ jobs:
               git commit -m "chore: migrate GitHub Pages URL to ${NEW_DOMAIN}"
 
               if git push origin HEAD; then
-                echo "  ✅ Pushed updated Pages references for $full_name"
+                echo "  ✅ Pushed $full_name"
                 CHANGED=$((CHANGED + 1))
               else
                 echo "  ❌ Push failed for $full_name"
                 FAILED=$((FAILED + 1))
               fi
             else
-              echo "  ✔️  No stale Pages URLs found — skipping"
+              echo "  ✔️  No stale Pages URLs — skipping"
               SKIPPED=$((SKIPPED + 1))
             fi
 
-            curl -s -X PUT \
+            # Enforce HTTPS on the Pages site while we're here
+            curl -sS -X PUT \
               -H "Authorization: token ${GH_PAT}" \
               -H "Accept: application/vnd.github+json" \
               -H "Content-Type: application/json" \
               "https://api.github.com/repos/${full_name}/pages" \
               -d '{"https_enforced": true}' > /dev/null \
-              && echo "  🔒 HTTPS enforced on Pages"
+              && echo "  🔒 HTTPS enforced"
 
             cd ../..
             rm -rf workdir/temp
