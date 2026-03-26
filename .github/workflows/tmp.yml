@@ -13,12 +13,10 @@ jobs:
 
       - name: Collect all repo full_names
         run: |
-          # Personal repos (owner only, skip forks)
           curl -fsSL -H "Authorization: token ${{ secrets.GH_PAT }}" \
             "https://api.github.com/user/repos?per_page=100&type=owner" \
             | jq -r '.[].full_name' > repo_names.txt
 
-          # Org repos
           curl -fsSL -H "Authorization: token ${{ secrets.GH_PAT }}" \
             "https://api.github.com/user/orgs" \
             | jq -r '.[].login' \
@@ -28,7 +26,6 @@ jobs:
                 | jq -r '.[].full_name' >> repo_names.txt
             done
 
-          # Deduplicate just in case
           sort -u repo_names.txt -o repo_names.txt
 
           echo "=== Repos to process ==="
@@ -52,7 +49,6 @@ jobs:
 
             auth_url="https://x-access-token:${GH_PAT}@github.com/${full_name}.git"
 
-            # Clone with auth baked in so push works via 'origin' with no URL tricks
             if ! git clone --depth=1 "$auth_url" workdir/temp 2>&1; then
               echo "⚠️  Clone failed for $full_name — skipping"
               FAILED=$((FAILED + 1))
@@ -62,12 +58,11 @@ jobs:
 
             cd workdir/temp
 
-            # Exclude .git dir so we never touch git internals
-            if grep -rql --exclude-dir=.git "pro-grammer-SD" .; then
+            if grep -rql --exclude-dir=.git "programmersd" .; then
               echo "🔍 Found references — replacing..."
 
-              grep -rl --exclude-dir=.git "pro-grammer-SD" . \
-                | xargs sed -i 's/pro-grammer-SD/programmersd/g'
+              grep -rl --exclude-dir=.git "programmersd" . \
+                | xargs sed -i 's/programmersd/programmersd21/g'
 
               git config user.name  "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
