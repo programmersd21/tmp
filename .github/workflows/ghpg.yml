@@ -1,0 +1,143 @@
+name: Migrate GitHub Pages URLs (pro-grammer-SD → programmersd21)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  migrate-pages:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Collect all repo full_names
+        run: |
+          curl -fsSL -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            "https://api.github.com/user/repos?per_page=100&type=owner" \
+            | jq -r '.[].full_name' > repo_names.txt
+
+          curl -fsSL -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            "https://api.github.com/user/orgs" \
+            | jq -r '.[].login' \
+          | while read -r org; do
+              curl -fsSL -H "Authorization: token ${{ secrets.GH_PAT }}" \
+                "https://api.github.com/orgs/${org}/repos?per_page=100" \
+                | jq -r '.[].full_name' >> repo_names.txt
+            done
+
+          sort -u repo_names.txt -o repo_names.txt
+          echo "Total repos to scan: $(wc -l < repo_names.txt)"
+
+      - name: Filter repos with GitHub Pages enabled
+        run: |
+          > pages_repos.txt
+
+          while IFS= read -r full_name; do
+            response=$(curl -fsSL -o /dev/null -w "%{http_code}" \
+              -H "Authorization: token ${{ secrets.GH_PAT }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${full_name}/pages")
+
+            if [ "$response" = "200" ]; then
+              echo "  📄 Pages enabled: $full_name"
+              echo "$full_name" >> pages_repos.txt
+            else
+              echo "  ·  No Pages:      $full_name"
+            fi
+          done < repo_names.txt
+
+          echo ""
+          echo "Repos with Pages: $(wc -l < pages_repos.txt)"
+          cat pages_repos.txt
+
+      - name: Replace Pages URLs and update Pages source branch
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          # Only the .github.io domain is in scope — nothing else is touched
+          OLD_PATTERN: 'pro-grammer-SD\.github\.io'
+          NEW_DOMAIN:  'programmersd21.github.io'
+        run: |
+          mkdir -p workdir
+          CHANGED=0
+          SKIPPED=0
+          FAILED=0
+
+          while IFS= read -r full_name; do
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📦 Processing: $full_name"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            auth_url="https://x-access-token:${GH_PAT}@github.com/${full_name}.git"
+
+            pages_info=$(curl -fsSL \
+              -H "Authorization: token ${GH_PAT}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${full_name}/pages")
+
+            pages_branch=$(echo "$pages_info" | jq -r '.source.branch // "gh-pages"')
+            pages_url=$(echo "$pages_info"    | jq -r '.html_url // "unknown"')
+
+            echo "  🌐 Current Pages URL  : $pages_url"
+            echo "  🌿 Pages source branch: $pages_branch"
+
+            if ! git clone --depth=1 --branch "$pages_branch" "$auth_url" workdir/temp 2>&1; then
+              echo "  ⚠️  Branch '$pages_branch' clone failed, falling back to default branch"
+              if ! git clone --depth=1 "$auth_url" workdir/temp 2>&1; then
+                echo "  ❌ Clone failed entirely — skipping"
+                FAILED=$((FAILED + 1))
+                rm -rf workdir/temp
+                continue
+              fi
+            fi
+
+            cd workdir/temp
+
+            # grep with -i so it catches any casing of the old domain
+            if grep -rqil --exclude-dir=.git "pro-grammer-SD\.github\.io" .; then
+              echo "  🔍 Found stale Pages URL references — replacing..."
+
+              # perl -i with /gi: case-insensitive, replaces all occurrences per line
+              # The pattern is anchored to .github.io so nothing else is touched
+              grep -ril --exclude-dir=.git "pro-grammer-SD\.github\.io" . \
+                | xargs perl -pi -e "s/${OLD_PATTERN}/${NEW_DOMAIN}/gi"
+
+              git config user.name  "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+
+              git add -A
+              git commit -m "chore: migrate GitHub Pages URL to ${NEW_DOMAIN}"
+
+              if git push origin HEAD; then
+                echo "  ✅ Pushed updated Pages references for $full_name"
+                CHANGED=$((CHANGED + 1))
+              else
+                echo "  ❌ Push failed for $full_name"
+                FAILED=$((FAILED + 1))
+              fi
+            else
+              echo "  ✔️  No stale Pages URLs found — skipping"
+              SKIPPED=$((SKIPPED + 1))
+            fi
+
+            curl -s -X PUT \
+              -H "Authorization: token ${GH_PAT}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${full_name}/pages" \
+              -d '{"https_enforced": true}' > /dev/null \
+              && echo "  🔒 HTTPS enforced on Pages"
+
+            cd ../..
+            rm -rf workdir/temp
+
+          done < pages_repos.txt
+
+          echo ""
+          echo "══════════════════════════════════════════"
+          echo "  Migration Summary"
+          echo "  ✅ Updated  : $CHANGED"
+          echo "  ⏭️  Skipped  : $SKIPPED"
+          echo "  ❌ Failed   : $FAILED"
+          echo "══════════════════════════════════════════"
