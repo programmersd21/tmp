@@ -9,54 +9,93 @@ jobs:
 
     steps:
       - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+        run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Get personal repos
+      - name: Collect all repo full_names
         run: |
-          curl -s -H "Authorization: token ${{ secrets.GH_PAT }}" \
-          "https://api.github.com/user/repos?per_page=100" > personal.json
+          # Personal repos (owner only, skip forks)
+          curl -fsSL -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            "https://api.github.com/user/repos?per_page=100&type=owner" \
+            | jq -r '.[].full_name' > repo_names.txt
 
-      - name: Get organizations
-        run: |
-          curl -s -H "Authorization: token ${{ secrets.GH_PAT }}" \
-          "https://api.github.com/user/orgs" > orgs.json
+          # Org repos
+          curl -fsSL -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            "https://api.github.com/user/orgs" \
+            | jq -r '.[].login' \
+          | while read -r org; do
+              curl -fsSL -H "Authorization: token ${{ secrets.GH_PAT }}" \
+                "https://api.github.com/orgs/${org}/repos?per_page=100" \
+                | jq -r '.[].full_name' >> repo_names.txt
+            done
 
-      - name: Get org repos
-        run: |
-          > org_repos.json
-          for org in $(jq -r '.[].login' orgs.json); do
-            curl -s -H "Authorization: token ${{ secrets.GH_PAT }}" \
-            "https://api.github.com/orgs/$org/repos?per_page=100" >> org_repos.json
-          done
+          # Deduplicate just in case
+          sort -u repo_names.txt -o repo_names.txt
 
-      - name: Merge repo lists
-        run: |
-          cat personal.json org_repos.json | jq -r '.[].clone_url' > repos.txt
+          echo "=== Repos to process ==="
+          cat repo_names.txt
+          echo "Total: $(wc -l < repo_names.txt)"
 
       - name: Process repositories
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          mkdir repos
+          mkdir -p workdir
+          CHANGED=0
+          SKIPPED=0
+          FAILED=0
 
-          while read repo; do
-            echo "Processing $repo"
+          while IFS= read -r full_name; do
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📦 Processing: $full_name"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-            git clone "$repo" repos/temp
-            cd repos/temp
+            auth_url="https://x-access-token:${GH_PAT}@github.com/${full_name}.git"
 
-            if grep -R "pro-grammer-SD" .; then
-              grep -rl "pro-grammer-SD" . | xargs sed -i 's/pro-grammer-SD/programmersd/g'
+            # Clone with auth baked in so push works via 'origin' with no URL tricks
+            if ! git clone --depth=1 "$auth_url" workdir/temp 2>&1; then
+              echo "⚠️  Clone failed for $full_name — skipping"
+              FAILED=$((FAILED + 1))
+              rm -rf workdir/temp
+              continue
+            fi
 
-              git config user.name "github-actions"
-              git config user.email "actions@github.com"
+            cd workdir/temp
 
-              git add .
+            # Exclude .git dir so we never touch git internals
+            if grep -rql --exclude-dir=.git "pro-grammer-SD" .; then
+              echo "🔍 Found references — replacing..."
+
+              grep -rl --exclude-dir=.git "pro-grammer-SD" . \
+                | xargs sed -i 's/pro-grammer-SD/programmersd/g'
+
+              git config user.name  "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+
+              git add -A
               git commit -m "chore: update username references after GitHub rename"
-              git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/$(git config --get remote.origin.url | sed 's/.*github.com\///')
+
+              if git push origin HEAD; then
+                echo "✅ Pushed $full_name"
+                CHANGED=$((CHANGED + 1))
+              else
+                echo "❌ Push failed for $full_name"
+                FAILED=$((FAILED + 1))
+              fi
+            else
+              echo "✔️  No references found — skipping"
+              SKIPPED=$((SKIPPED + 1))
             fi
 
             cd ../..
-            rm -rf repos/temp
+            rm -rf workdir/temp
 
-          done < repos.txt
+          done < repo_names.txt
+
+          echo ""
+          echo "══════════════════════════════"
+          echo "  Summary"
+          echo "  ✅ Changed : $CHANGED"
+          echo "  ⏭️  Skipped : $SKIPPED"
+          echo "  ❌ Failed  : $FAILED"
+          echo "══════════════════════════════"
